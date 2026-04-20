@@ -1,5 +1,4 @@
 import json
-import numpy as np
 
 from fastapi import APIRouter, UploadFile, File, Body, Form, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
@@ -7,12 +6,17 @@ from sqlalchemy.orm import Session
 from app.services.mri_service import predict_mri
 from app.services.eeg_service import predict_eeg
 from app.services.mri_xai_service import predict_mri_with_xai
+from app.services.eeg_xai_service import predict_eeg_with_xai
 from app.services.fusion_service import build_fusion_result, save_inference_result
 from app.core.config import get_model_io_details, mri_session, eeg_session
 from app.db.database import get_db
 from app.db.models import InferenceResult
 from app.utils.explanation import generate_multimodal_explanation
-from app.services.eeg_xai_service import predict_eeg_with_xai
+
+try:
+    from app.services.llm_explanation_service import generate_llm_multimodal_explanation
+except Exception:
+    generate_llm_multimodal_explanation = None
 
 router = APIRouter(prefix="/predict", tags=["Prediction"])
 
@@ -95,6 +99,15 @@ async def predict_eeg_route(eeg_array: list = Body(...)):
     }
 
 
+@router.post("/eeg-xai")
+async def predict_eeg_xai_route(eeg_array: list = Body(...)):
+    result = await predict_eeg_with_xai(eeg_array)
+    return {
+        "success": True,
+        "data": result
+    }
+
+
 @router.post("/multimodal")
 async def predict_multimodal_route(
     file: UploadFile = File(...),
@@ -120,12 +133,28 @@ async def predict_multimodal_route(
         eeg_result=eeg_result
     )
 
+    # Default fallback = rule-based
     explanation_text = generate_multimodal_explanation(
         mri_label=mri_xai_result["prediction_label"],
         eeg_label=eeg_result["prediction_label"],
         final_label=fusion_result["prediction_label"],
         confidence=fusion_result["confidence"],
     )
+    explanation_source = "rule_based"
+
+    # Kalau LLM service tersedia, pakai narasi yang lebih natural
+    if generate_llm_multimodal_explanation is not None:
+        try:
+            explanation_text = generate_llm_multimodal_explanation(
+                mri_label=mri_xai_result["prediction_label"],
+                eeg_label=eeg_result["prediction_label"],
+                final_label=fusion_result["prediction_label"],
+                confidence=fusion_result["confidence"],
+                xai_method=mri_xai_result["xai_method"],
+            )
+            explanation_source = "llm"
+        except Exception as e:
+            print("LLM multimodal explanation error:", e)
 
     result = {
         "mri_result": {
@@ -133,6 +162,8 @@ async def predict_multimodal_route(
             "prediction_label": mri_xai_result["prediction_label"],
             "confidence": mri_xai_result["confidence"],
             "probabilities": mri_xai_result["probabilities"],
+            "heatmap_legend": mri_xai_result.get("heatmap_legend"),
+            "clinical_note": mri_xai_result.get("clinical_note"),
             "message": "MRI inference berhasil"
         },
         "eeg_result": eeg_result,
@@ -143,6 +174,7 @@ async def predict_multimodal_route(
             "xai_method": mri_xai_result["xai_method"]
         },
         "explanation_text": explanation_text,
+        "explanation_source": explanation_source,
         "message": "Fusion MRI dan EEG berhasil"
     }
 
@@ -203,12 +235,4 @@ def get_inference_history_detail(
     return {
         "success": True,
         "data": format_inference_result(item)
-    }
-
-@router.post("/eeg-xai")
-async def predict_eeg_xai_route(eeg_array: list = Body(...)):
-    result = await predict_eeg_with_xai(eeg_array)
-    return {
-        "success": True,
-        "data": result
     }
