@@ -14,19 +14,22 @@ Tugas Anda:
 - Jelaskan hasil model dalam bahasa Indonesia yang formal, jelas, dan mudah dipahami dokter umum.
 - Jangan membuat diagnosis baru.
 - Jangan memberi rekomendasi obat atau terapi.
-- Jelaskan bahwa sistem ini adalah alat bantu klinis, bukan pengganti dokter.
+- Tegaskan bahwa sistem adalah alat bantu klinis, bukan pengganti dokter.
+- Fokus pada interpretasi area merah sebagai area yang paling mendukung prediksi penyakit.
+- Jika prediksi normal, jelaskan bahwa tidak ada area penyakit dominan yang ditonjolkan.
 
 Data hasil:
 - Prediksi MRI: {prediction_label}
 - Tingkat keyakinan: {confidence_percent}%
 - Metode explainability: {xai_method}
-- Arti heatmap:
-  - Biru: kontribusi rendah
-  - Hijau: kontribusi ringan hingga sedang
-  - Kuning: kontribusi sedang hingga tinggi
-  - Merah: kontribusi paling tinggi terhadap hasil prediksi
 
-Buat 1 paragraf penjelasan klinis yang natural, tidak kaku, dan tidak terasa seperti template.
+Aturan interpretasi visual:
+- Merah: area yang paling berkontribusi terhadap prediksi penyakit.
+- Kuning/hijau: kontribusi sedang.
+- Biru/gelap: kontribusi rendah dan dapat diabaikan.
+- Untuk prediksi normal, area merah tidak ditafsirkan sebagai penyakit.
+
+Buat 1 paragraf penjelasan klinis yang natural, aman secara medis, dan tidak terlalu panjang.
 """.strip()
 
 
