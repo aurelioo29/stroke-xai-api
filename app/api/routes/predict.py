@@ -12,6 +12,7 @@ from app.core.config import get_model_io_details, mri_session, eeg_session
 from app.db.database import get_db
 from app.db.models import InferenceResult
 from app.utils.explanation import generate_multimodal_explanation
+from app.utils.eeg_csv import read_eeg_csv
 
 try:
     from app.services.llm_explanation_service import generate_llm_multimodal_explanation
@@ -235,4 +236,30 @@ def get_inference_history_detail(
     return {
         "success": True,
         "data": format_inference_result(item)
+    }
+
+@router.post("/eeg-xai-csv")
+async def predict_eeg_xai_csv_route(
+    file: UploadFile = File(...),
+    row_index: int = Form(0),
+    graph_channel: int = Form(1),
+):
+    csv_result = await read_eeg_csv(
+        file=file,
+        row_index=row_index,
+        graph_channel=graph_channel,
+    )
+
+    result = await predict_eeg_with_xai(csv_result["model_input"])
+
+    return {
+        "success": True,
+        "data": {
+            **result,
+            "graph_data": csv_result["graph_data"],
+            "feature_count": csv_result["feature_count"],
+            "selected_row": csv_result["selected_row"],
+            "selected_channel": csv_result["selected_channel"],
+            "uploaded_filename": csv_result["uploaded_filename"],
+        }
     }
