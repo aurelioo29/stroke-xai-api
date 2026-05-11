@@ -215,23 +215,39 @@ async def predict_eeg_xai_csv_route(
     file: UploadFile = File(...),
     row_index: int = Form(0),
     graph_channel: int = Form(1),
+
+    # section_count = jumlah section, default P1-P4
+    section_count: int = Form(4),
+
+    # section_size:
+    # - kosong / None = dibagi rata dari semua sample
+    # - isi 5 = P1 s1-s5, P2 s6-s10, dst
+    section_size: int | None = Form(None),
 ):
     csv_result = await read_eeg_csv(
         file=file,
         row_index=row_index,
         graph_channel=graph_channel,
+        section_count=section_count,
+        section_size=section_size,
     )
 
-    result = await predict_eeg_with_xai(csv_result["model_input"])
+    result = await predict_eeg_with_xai(
+        eeg_data=csv_result["model_input"],
+        graph_sections=csv_result["graph_sections"],
+    )
 
     return {
         "success": True,
         "data": {
             **result,
             "graph_data": csv_result["graph_data"],
+            "graph_sections": csv_result["graph_sections"],
             "feature_count": csv_result["feature_count"],
             "selected_row": csv_result["selected_row"],
             "selected_channel": csv_result["selected_channel"],
+            "section_count": csv_result["section_count"],
+            "section_size": csv_result["section_size"],
             "uploaded_filename": csv_result["uploaded_filename"],
         },
     }
