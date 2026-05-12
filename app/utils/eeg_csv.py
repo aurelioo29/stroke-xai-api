@@ -1,16 +1,11 @@
 import re
 import pandas as pd
-import numpy as np
 from fastapi import UploadFile
 
 from app.utils.preprocess_eeg import get_expected_feature_count
 
 
 def natural_sample_sort(column_name: str):
-    """
-    Sort kolom seperti ch1_s1, ch1_s2, ..., ch1_s1000.
-    """
-
     match = re.search(r"_s(\d+)$", str(column_name))
 
     if not match:
@@ -29,12 +24,6 @@ def get_channel_number(column_name: str):
 
 
 def get_channel_sample_columns(columns, graph_channel: int):
-    """
-    Ambil kolom channel tertentu.
-    Contoh graph_channel=1:
-    ch1_s1, ch1_s2, ch1_s3, ...
-    """
-
     pattern = re.compile(rf"^ch{graph_channel}_s\d+$")
 
     channel_columns = [
@@ -42,30 +31,14 @@ def get_channel_sample_columns(columns, graph_channel: int):
         if pattern.match(str(col))
     ]
 
-    channel_columns = sorted(
-        channel_columns,
-        key=natural_sample_sort,
-    )
-
-    return channel_columns
+    return sorted(channel_columns, key=natural_sample_sort)
 
 
 def select_model_feature_columns(df: pd.DataFrame):
-    """
-    Pilih kolom fitur yang cocok dengan scaler.
-
-    Jika scaler lama dilatih dengan trial ikut fitur:
-    - drop subject + label
-    - trial tetap masuk
-
-    Jika scaler baru dilatih tanpa trial:
-    - drop subject + trial + label
-    """
-
     expected_count = get_expected_feature_count()
     columns = list(df.columns)
 
-    # Mode 1: trial tetap ikut
+    # Mode 1: trial ikut fitur
     drop_subject_label = [
         col for col in ["subject", "label"]
         if col in columns
@@ -84,7 +57,7 @@ def select_model_feature_columns(df: pd.DataFrame):
             "actual_feature_count": len(feature_columns_with_trial),
         }
 
-    # Mode 2: trial dibuang
+    # Mode 2: trial tidak ikut fitur
     drop_subject_trial_label = [
         col for col in ["subject", "trial", "label"]
         if col in columns
@@ -108,38 +81,24 @@ def select_model_feature_columns(df: pd.DataFrame):
         f"Scaler membutuhkan {expected_count} fitur. "
         f"Jika drop subject+label, fitur menjadi {len(feature_columns_with_trial)}. "
         f"Jika drop subject+trial+label, fitur menjadi {len(feature_columns_without_trial)}. "
-        f"Cek apakah CSV, scaler, dan model berasal dari preprocessing yang sama."
+        f"Cek apakah CSV, scaler, dan model berasal dari preprocessing training yang sama."
     )
 
 
 def build_eeg_graph_sections(
     row: pd.Series,
     channel_columns: list,
-    model_feature_columns: list,
+    model_feature_columns: list | None = None,
     section_count: int = 4,
-    section_size: int = 20,
-    cycle_count: int = 2,
+    section_size: int = 256,
+    cycle_count: int = 1,
 ):
     """
-    Membuat section EEG.
-
-    Default:
-    section_count = 4
-    section_size = 20
-    cycle_count = 2
-
-    Hasil:
-    Cycle 1:
-    P1 = s1-s20
-    P2 = s21-s40
-    P3 = s41-s60
-    P4 = s61-s80
-
-    Cycle 2:
-    P1 = s81-s100
-    P2 = s101-s120
-    P3 = s121-s140
-    P4 = s141-s160
+    Final section:
+    P1 = s1-s256
+    P2 = s257-s512
+    P3 = s513-s768
+    P4 = s769-s1024
     """
 
     total_samples = len(channel_columns)
@@ -151,12 +110,10 @@ def build_eeg_graph_sections(
         section_count = 4
 
     if section_size is None or section_size <= 0:
-        section_size = 20
+        section_size = 256
 
-    # cycle_count = 0 berarti auto sampai sample habis
     if cycle_count is None or cycle_count <= 0:
-        samples_per_cycle = section_count * section_size
-        cycle_count = int(np.ceil(total_samples / samples_per_cycle))
+        cycle_count = 1
 
     sections = []
 
@@ -183,11 +140,14 @@ def build_eeg_graph_sections(
             cycle_number = cycle_index + 1
             section_id = f"C{cycle_number}_P{section_index + 1}"
 
-            model_indices = [
-                model_feature_columns.index(col)
-                for col in selected_columns
-                if col in model_feature_columns
-            ]
+            model_indices = []
+
+            if model_feature_columns:
+                model_indices = [
+                    model_feature_columns.index(col)
+                    for col in selected_columns
+                    if col in model_feature_columns
+                ]
 
             data = [
                 {
@@ -205,14 +165,15 @@ def build_eeg_graph_sections(
                 "name": section_name,
                 "cycle": cycle_number,
                 "cycle_label": f"Cycle {cycle_number}",
-                "display_name": f"C{cycle_number} • {section_name}",
+                "display_name": section_name if cycle_count == 1 else f"C{cycle_number} • {section_name}",
                 "title": (
-                    f"C{cycle_number} {section_name}: "
+                    f"{section_name}: "
                     f"ch{channel_number}_s{start_sample} - "
                     f"ch{channel_number}_s{end_sample}"
                 ),
                 "start_sample": start_sample,
                 "end_sample": end_sample,
+                "channel": channel_number,
                 "columns": selected_columns,
                 "model_indices": model_indices,
                 "data": data,
@@ -221,21 +182,87 @@ def build_eeg_graph_sections(
     return sections
 
 
+def build_subject_average_graphs(
+    df: pd.DataFrame,
+    channel_columns: list,
+    graph_channel: int = 1,
+    section_count: int = 4,
+    section_size: int = 256,
+):
+    """
+    Membuat 1 grafik rata-rata untuk setiap subject.
+
+    Jadi:
+    subject_1 = rata-rata 50 trial
+    subject_2 = rata-rata 50 trial
+    dst.
+    """
+
+    if "subject" not in df.columns:
+        return []
+
+    subject_graphs = []
+
+    subjects = sorted(
+        df["subject"].dropna().unique().tolist(),
+        key=lambda value: int(str(value).split("_")[-1])
+        if str(value).split("_")[-1].isdigit()
+        else str(value)
+    )
+
+    for subject in subjects:
+        subject_df = df[df["subject"] == subject]
+
+        if subject_df.empty:
+            continue
+
+        # Rata-rata 50 trial / semua trial milik subject
+        averaged_signal = subject_df[channel_columns].astype(float).mean(axis=0)
+
+        averaged_row = pd.Series(
+            data=averaged_signal.values,
+            index=channel_columns,
+        )
+
+        sections = build_eeg_graph_sections(
+            row=averaged_row,
+            channel_columns=channel_columns,
+            model_feature_columns=None,
+            section_count=section_count,
+            section_size=section_size,
+            cycle_count=1,
+        )
+
+        graph_data = []
+
+        for section in sections:
+            for point in section["data"]:
+                graph_data.append({
+                    **point,
+                    "section": section["name"],
+                    "section_id": section["id"],
+                    "cycle": section["cycle"],
+                })
+
+        subject_graphs.append({
+            "subject": subject,
+            "trial_count": int(len(subject_df)),
+            "selected_channel": graph_channel,
+            "graph_data": graph_data,
+            "graph_sections": sections,
+        })
+
+    return subject_graphs
+
+
 async def read_eeg_csv(
     file: UploadFile,
     row_index: int = 0,
     graph_channel: int = 1,
     section_count: int = 4,
-    section_size: int = 20,
-    cycle_count: int = 2,
+    section_size: int = 256,
+    cycle_count: int = 1,
 ):
-    """
-    Baca CSV EEG dan return:
-    - model_input
-    - graph_data
-    - graph_sections
-    """
-
     df = pd.read_csv(file.file)
 
     if df.empty:
@@ -243,7 +270,8 @@ async def read_eeg_csv(
 
     if row_index < 0 or row_index >= len(df):
         raise ValueError(
-            f"row_index tidak valid. Diterima {row_index}, total row {len(df)}."
+            f"row_index tidak valid. "
+            f"Diterima {row_index}, total row {len(df)}."
         )
 
     row = df.iloc[row_index]
@@ -266,7 +294,7 @@ async def read_eeg_csv(
         raise ValueError(
             f"Tidak ditemukan kolom untuk channel ch{graph_channel}. "
             f"Pastikan format kolom seperti ch{graph_channel}_s1, "
-            f"ch{graph_channel}_s2, dst."
+            f"ch{graph_channel}_s2, ..., ch{graph_channel}_s1024."
         )
 
     graph_sections = build_eeg_graph_sections(
@@ -289,16 +317,35 @@ async def read_eeg_csv(
                 "cycle": section["cycle"],
             })
 
+    subject_graphs = build_subject_average_graphs(
+        df=df,
+        channel_columns=channel_columns,
+        graph_channel=graph_channel,
+        section_count=section_count,
+        section_size=section_size,
+    )
+
+    subject_count = len(subject_graphs)
+
     return {
         "model_input": model_input,
+
+        # Grafik selected row / trial
         "graph_data": graph_data,
         "graph_sections": graph_sections,
+
+        # Grafik rata-rata setiap subject
+        "subject_graphs": subject_graphs,
+        "subject_count": subject_count,
+
         "feature_count": len(model_input),
         "selected_row": row_index,
         "selected_channel": graph_channel,
+
         "section_count": section_count,
         "section_size": section_size,
         "cycle_count": cycle_count,
+
         "feature_selection_info": feature_selection_info,
         "uploaded_filename": file.filename,
     }

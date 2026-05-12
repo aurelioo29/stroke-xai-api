@@ -216,22 +216,9 @@ async def predict_eeg_xai_csv_route(
     row_index: int = Form(0),
     graph_channel: int = Form(1),
 
-    # P1-P4
     section_count: int = Form(4),
-
-    # 20 sample per section:
-    # P1 = s1-s20
-    # P2 = s21-s40
-    # P3 = s41-s60
-    # P4 = s61-s80
-    section_size: int = Form(20),
-
-    # 2 cycle:
-    # C1 = P1-P4
-    # C2 = P1-P4
-    #
-    # isi 0 kalau mau auto sampai sample habis
-    cycle_count: int = Form(2),
+    section_size: int = Form(256),
+    cycle_count: int = Form(1),
 ):
     csv_result = await read_eeg_csv(
         file=file,
@@ -251,8 +238,13 @@ async def predict_eeg_xai_csv_route(
         "success": True,
         "data": {
             **result,
+
             "graph_data": csv_result["graph_data"],
             "graph_sections": csv_result["graph_sections"],
+
+            "subject_graphs": csv_result["subject_graphs"],
+            "subject_count": csv_result["subject_count"],
+
             "feature_count": csv_result["feature_count"],
             "selected_row": csv_result["selected_row"],
             "selected_channel": csv_result["selected_channel"],
