@@ -216,13 +216,22 @@ async def predict_eeg_xai_csv_route(
     row_index: int = Form(0),
     graph_channel: int = Form(1),
 
-    # section_count = jumlah section, default P1-P4
+    # P1-P4
     section_count: int = Form(4),
 
-    # section_size:
-    # - kosong / None = dibagi rata dari semua sample
-    # - isi 5 = P1 s1-s5, P2 s6-s10, dst
-    section_size: int | None = Form(None),
+    # 20 sample per section:
+    # P1 = s1-s20
+    # P2 = s21-s40
+    # P3 = s41-s60
+    # P4 = s61-s80
+    section_size: int = Form(20),
+
+    # 2 cycle:
+    # C1 = P1-P4
+    # C2 = P1-P4
+    #
+    # isi 0 kalau mau auto sampai sample habis
+    cycle_count: int = Form(2),
 ):
     csv_result = await read_eeg_csv(
         file=file,
@@ -230,6 +239,7 @@ async def predict_eeg_xai_csv_route(
         graph_channel=graph_channel,
         section_count=section_count,
         section_size=section_size,
+        cycle_count=cycle_count,
     )
 
     result = await predict_eeg_with_xai(
@@ -248,6 +258,8 @@ async def predict_eeg_xai_csv_route(
             "selected_channel": csv_result["selected_channel"],
             "section_count": csv_result["section_count"],
             "section_size": csv_result["section_size"],
+            "cycle_count": csv_result["cycle_count"],
+            "feature_selection_info": csv_result["feature_selection_info"],
             "uploaded_filename": csv_result["uploaded_filename"],
         },
     }

@@ -9,7 +9,6 @@ from app.utils.preprocess_eeg import get_expected_feature_count
 def natural_sample_sort(column_name: str):
     """
     Sort kolom seperti ch1_s1, ch1_s2, ..., ch1_s1000.
-    Bukan sort string yang bikin ch1_s1000 muncul sebelum ch1_s2.
     """
 
     match = re.search(r"_s(\d+)$", str(column_name))
@@ -30,6 +29,12 @@ def get_channel_number(column_name: str):
 
 
 def get_channel_sample_columns(columns, graph_channel: int):
+    """
+    Ambil kolom channel tertentu.
+    Contoh graph_channel=1:
+    ch1_s1, ch1_s2, ch1_s3, ...
+    """
+
     pattern = re.compile(rf"^ch{graph_channel}_s\d+$")
 
     channel_columns = [
@@ -47,23 +52,20 @@ def get_channel_sample_columns(columns, graph_channel: int):
 
 def select_model_feature_columns(df: pd.DataFrame):
     """
-    Pilih kolom fitur yang jumlahnya cocok dengan scaler.
+    Pilih kolom fitur yang cocok dengan scaler.
 
-    Kenapa perlu begini?
-    Karena model lama kamu kemungkinan dilatih dengan kolom trial ikut fitur,
-    sehingga expected feature = 16385.
+    Jika scaler lama dilatih dengan trial ikut fitur:
+    - drop subject + label
+    - trial tetap masuk
 
-    Kalau trial dibuang, hasilnya jadi 16384 dan backend error.
+    Jika scaler baru dilatih tanpa trial:
+    - drop subject + trial + label
     """
 
     expected_count = get_expected_feature_count()
-
     columns = list(df.columns)
 
-    # Opsi 1:
-    # Drop subject dan label saja.
-    # trial tetap ikut.
-    # Ini cocok kalau scaler lama dilatih dengan trial ikut fitur.
+    # Mode 1: trial tetap ikut
     drop_subject_label = [
         col for col in ["subject", "label"]
         if col in columns
@@ -82,9 +84,7 @@ def select_model_feature_columns(df: pd.DataFrame):
             "actual_feature_count": len(feature_columns_with_trial),
         }
 
-    # Opsi 2:
-    # Drop subject, trial, label.
-    # Ini cocok kalau scaler baru dilatih tanpa trial.
+    # Mode 2: trial dibuang
     drop_subject_trial_label = [
         col for col in ["subject", "trial", "label"]
         if col in columns
@@ -108,7 +108,7 @@ def select_model_feature_columns(df: pd.DataFrame):
         f"Scaler membutuhkan {expected_count} fitur. "
         f"Jika drop subject+label, fitur menjadi {len(feature_columns_with_trial)}. "
         f"Jika drop subject+trial+label, fitur menjadi {len(feature_columns_without_trial)}. "
-        f"Cek kembali apakah CSV dan scaler berasal dari preprocessing training yang sama."
+        f"Cek apakah CSV, scaler, dan model berasal dari preprocessing yang sama."
     )
 
 
@@ -117,24 +117,54 @@ def build_eeg_graph_sections(
     channel_columns: list,
     model_feature_columns: list,
     section_count: int = 4,
-    section_size: int | None = None,
+    section_size: int = 20,
+    cycle_count: int = 2,
 ):
+    """
+    Membuat section EEG.
+
+    Default:
+    section_count = 4
+    section_size = 20
+    cycle_count = 2
+
+    Hasil:
+    Cycle 1:
+    P1 = s1-s20
+    P2 = s21-s40
+    P3 = s41-s60
+    P4 = s61-s80
+
+    Cycle 2:
+    P1 = s81-s100
+    P2 = s101-s120
+    P3 = s121-s140
+    P4 = s141-s160
+    """
+
     total_samples = len(channel_columns)
 
     if total_samples == 0:
         return []
 
+    if section_count <= 0:
+        section_count = 4
+
+    if section_size is None or section_size <= 0:
+        section_size = 20
+
+    # cycle_count = 0 berarti auto sampai sample habis
+    if cycle_count is None or cycle_count <= 0:
+        samples_per_cycle = section_count * section_size
+        cycle_count = int(np.ceil(total_samples / samples_per_cycle))
+
     sections = []
 
-    # Mode fixed:
-    # section_size=5:
-    # P1 = s1-s5
-    # P2 = s6-s10
-    # P3 = s11-s15
-    # P4 = s16-s20
-    if section_size is not None and section_size > 0:
-        for i in range(section_count):
-            start_idx = i * section_size
+    for cycle_index in range(cycle_count):
+        cycle_offset = cycle_index * section_count * section_size
+
+        for section_index in range(section_count):
+            start_idx = cycle_offset + section_index * section_size
             end_idx = min(start_idx + section_size, total_samples)
 
             if start_idx >= total_samples:
@@ -142,8 +172,16 @@ def build_eeg_graph_sections(
 
             selected_columns = channel_columns[start_idx:end_idx]
 
+            if not selected_columns:
+                continue
+
             start_sample = natural_sample_sort(selected_columns[0])
             end_sample = natural_sample_sort(selected_columns[-1])
+            channel_number = get_channel_number(selected_columns[0])
+
+            section_name = f"P{section_index + 1}"
+            cycle_number = cycle_index + 1
+            section_id = f"C{cycle_number}_P{section_index + 1}"
 
             model_indices = [
                 model_feature_columns.index(col)
@@ -155,17 +193,23 @@ def build_eeg_graph_sections(
                 {
                     "sample": natural_sample_sort(col),
                     "value": float(row[col]),
+                    "section_id": section_id,
+                    "section": section_name,
+                    "cycle": cycle_number,
                 }
                 for col in selected_columns
             ]
 
-            channel_number = get_channel_number(selected_columns[0])
-
             sections.append({
-                "name": f"P{i + 1}",
+                "id": section_id,
+                "name": section_name,
+                "cycle": cycle_number,
+                "cycle_label": f"Cycle {cycle_number}",
+                "display_name": f"C{cycle_number} • {section_name}",
                 "title": (
-                    f"P{i + 1}: ch{channel_number}_s{start_sample} "
-                    f"- ch{channel_number}_s{end_sample}"
+                    f"C{cycle_number} {section_name}: "
+                    f"ch{channel_number}_s{start_sample} - "
+                    f"ch{channel_number}_s{end_sample}"
                 ),
                 "start_sample": start_sample,
                 "end_sample": end_sample,
@@ -173,53 +217,6 @@ def build_eeg_graph_sections(
                 "model_indices": model_indices,
                 "data": data,
             })
-
-        return sections
-
-    # Mode auto:
-    # Semua sample dibagi rata menjadi P1-P4.
-    chunk_size = int(np.ceil(total_samples / section_count))
-
-    for i in range(section_count):
-        start_idx = i * chunk_size
-        end_idx = min(start_idx + chunk_size, total_samples)
-
-        if start_idx >= total_samples:
-            break
-
-        selected_columns = channel_columns[start_idx:end_idx]
-
-        start_sample = natural_sample_sort(selected_columns[0])
-        end_sample = natural_sample_sort(selected_columns[-1])
-
-        model_indices = [
-            model_feature_columns.index(col)
-            for col in selected_columns
-            if col in model_feature_columns
-        ]
-
-        data = [
-            {
-                "sample": natural_sample_sort(col),
-                "value": float(row[col]),
-            }
-            for col in selected_columns
-        ]
-
-        channel_number = get_channel_number(selected_columns[0])
-
-        sections.append({
-            "name": f"P{i + 1}",
-            "title": (
-                f"P{i + 1}: ch{channel_number}_s{start_sample} "
-                f"- ch{channel_number}_s{end_sample}"
-            ),
-            "start_sample": start_sample,
-            "end_sample": end_sample,
-            "columns": selected_columns,
-            "model_indices": model_indices,
-            "data": data,
-        })
 
     return sections
 
@@ -229,8 +226,16 @@ async def read_eeg_csv(
     row_index: int = 0,
     graph_channel: int = 1,
     section_count: int = 4,
-    section_size: int | None = None,
+    section_size: int = 20,
+    cycle_count: int = 2,
 ):
+    """
+    Baca CSV EEG dan return:
+    - model_input
+    - graph_data
+    - graph_sections
+    """
+
     df = pd.read_csv(file.file)
 
     if df.empty:
@@ -270,6 +275,7 @@ async def read_eeg_csv(
         model_feature_columns=model_feature_columns,
         section_count=section_count,
         section_size=section_size,
+        cycle_count=cycle_count,
     )
 
     graph_data = []
@@ -279,6 +285,8 @@ async def read_eeg_csv(
             graph_data.append({
                 **point,
                 "section": section["name"],
+                "section_id": section["id"],
+                "cycle": section["cycle"],
             })
 
     return {
@@ -290,6 +298,7 @@ async def read_eeg_csv(
         "selected_channel": graph_channel,
         "section_count": section_count,
         "section_size": section_size,
+        "cycle_count": cycle_count,
         "feature_selection_info": feature_selection_info,
         "uploaded_filename": file.filename,
     }
