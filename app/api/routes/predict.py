@@ -209,7 +209,6 @@ async def predict_eeg_xai_route(eeg_array: list = Body(...)):
         "data": result,
     }
 
-
 @router.post("/eeg-xai-csv")
 async def predict_eeg_xai_csv_route(
     file: UploadFile = File(...),
@@ -219,6 +218,8 @@ async def predict_eeg_xai_csv_route(
     section_count: int = Form(4),
     section_size: int = Form(256),
     cycle_count: int = Form(1),
+
+    sampling_rate: int = Form(256),
 ):
     csv_result = await read_eeg_csv(
         file=file,
@@ -227,6 +228,7 @@ async def predict_eeg_xai_csv_route(
         section_count=section_count,
         section_size=section_size,
         cycle_count=cycle_count,
+        sampling_rate=sampling_rate,
     )
 
     result = await predict_eeg_with_xai(
@@ -242,6 +244,9 @@ async def predict_eeg_xai_csv_route(
             "graph_data": csv_result["graph_data"],
             "graph_sections": csv_result["graph_sections"],
 
+            "frequency_analysis": csv_result["frequency_analysis"],
+            "sampling_rate": csv_result["sampling_rate"],
+
             "subject_graphs": csv_result["subject_graphs"],
             "subject_count": csv_result["subject_count"],
 
@@ -255,7 +260,6 @@ async def predict_eeg_xai_csv_route(
             "uploaded_filename": csv_result["uploaded_filename"],
         },
     }
-
 
 # ============================================================
 # Multimodal Prediction
@@ -395,6 +399,158 @@ async def predict_multimodal_route(
         "saved_result_id": saved.id,
     }
 
+@router.post("/multimodal-csv")
+async def predict_multimodal_csv_route(
+    mri_file: UploadFile = File(...),
+    eeg_file: UploadFile = File(...),
+
+    row_index: int = Form(0),
+    graph_channel: int = Form(1),
+
+    section_count: int = Form(4),
+    section_size: int = Form(256),
+    cycle_count: int = Form(1),
+    sampling_rate: int = Form(256),
+
+    db: Session = Depends(get_db),
+):
+    """
+    Fusion MRI + EEG CSV.
+
+    Endpoint ini dipakai supaya page Multimodal bisa:
+    - upload MRI image
+    - upload EEG CSV
+    - hasil EEG tetap sama formatnya dengan /predict/eeg-xai-csv
+    - hasil MRI tetap sama formatnya dengan /predict/mri-xai
+    """
+
+    # 1. MRI dengan zone-based XAI
+    mri_xai_result = await predict_mri_with_xai(mri_file)
+    mri_payload = build_mri_result_payload(mri_xai_result)
+
+    # 2. EEG CSV preprocessing + graph + frequency analysis
+    csv_result = await read_eeg_csv(
+        file=eeg_file,
+        row_index=row_index,
+        graph_channel=graph_channel,
+        section_count=section_count,
+        section_size=section_size,
+        cycle_count=cycle_count,
+        sampling_rate=sampling_rate,
+    )
+
+    # 3. EEG inference + XAI dari model input CSV
+    eeg_xai_result = await predict_eeg_with_xai(
+        eeg_data=csv_result["model_input"],
+        graph_sections=csv_result["graph_sections"],
+    )
+
+    eeg_payload = {
+        **eeg_xai_result,
+
+        "graph_data": csv_result["graph_data"],
+        "graph_sections": csv_result["graph_sections"],
+
+        "frequency_analysis": csv_result["frequency_analysis"],
+        "sampling_rate": csv_result["sampling_rate"],
+
+        "subject_graphs": csv_result["subject_graphs"],
+        "subject_count": csv_result["subject_count"],
+
+        "feature_count": csv_result["feature_count"],
+        "selected_row": csv_result["selected_row"],
+        "selected_channel": csv_result["selected_channel"],
+        "section_count": csv_result["section_count"],
+        "section_size": csv_result["section_size"],
+        "cycle_count": csv_result["cycle_count"],
+        "feature_selection_info": csv_result["feature_selection_info"],
+        "uploaded_filename": csv_result["uploaded_filename"],
+    }
+
+    # 4. Fusion MRI + EEG
+    fusion_result = build_fusion_result(
+        mri_result={
+            "prediction_index": mri_payload["prediction_index"],
+            "prediction_label": mri_payload["prediction_label"],
+            "confidence": mri_payload["confidence"],
+            "probabilities": mri_payload["probabilities"],
+        },
+        eeg_result={
+            "prediction_index": eeg_payload["prediction_index"],
+            "prediction_label": eeg_payload["prediction_label"],
+            "confidence": eeg_payload["confidence"],
+            "probabilities": eeg_payload["probabilities"],
+        },
+    )
+
+    # 5. Explanation
+    explanation_text = generate_multimodal_explanation(
+        mri_label=mri_payload["prediction_label"],
+        eeg_label=eeg_payload["prediction_label"],
+        final_label=fusion_result["prediction_label"],
+        confidence=fusion_result["confidence"],
+    )
+    explanation_source = "rule_based"
+
+    if generate_llm_multimodal_explanation is not None:
+        try:
+            explanation_text = generate_llm_multimodal_explanation(
+                mri_label=mri_payload["prediction_label"],
+                eeg_label=eeg_payload["prediction_label"],
+                final_label=fusion_result["prediction_label"],
+                confidence=fusion_result["confidence"],
+                xai_method=mri_payload.get(
+                    "xai_method",
+                    "zone_based_occlusion_sensitivity",
+                ),
+            )
+            explanation_source = "llm"
+        except Exception as e:
+            print("LLM multimodal CSV explanation error:", e)
+
+    # 6. Final response
+    result = {
+        "mode": "multimodal",
+
+        "mri_result": mri_payload,
+        "eeg_result": eeg_payload,
+        "fusion_result": fusion_result,
+
+        "xai_result": {
+            "raw_heatmap_url": mri_payload.get("raw_heatmap_url"),
+            "heatmap_url": mri_payload.get("heatmap_url"),
+            "overlay_url": mri_payload.get("overlay_url"),
+            "disease_focus_url": mri_payload.get("disease_focus_url"),
+            "zone_analysis": mri_payload.get("zone_analysis"),
+            "clinical_message": mri_payload.get("clinical_message"),
+            "xai_method": mri_payload.get("xai_method"),
+        },
+
+        "explanation_text": explanation_text,
+        "explanation_source": explanation_source,
+
+        "message": "Fusion MRI dan EEG CSV berhasil",
+    }
+
+    # 7. Save history
+    saved = save_inference_result(
+        db=db,
+        result=result,
+        mri_filename=mri_file.filename,
+        heatmap_url=mri_payload.get("raw_heatmap_url"),
+        overlay_url=mri_payload.get("overlay_url"),
+        xai_method=mri_payload.get(
+            "xai_method",
+            "zone_based_occlusion_sensitivity",
+        ),
+        explanation_text=explanation_text,
+    )
+
+    return {
+        "success": True,
+        "data": result,
+        "saved_result_id": saved.id,
+    }
 
 # ============================================================
 # History
